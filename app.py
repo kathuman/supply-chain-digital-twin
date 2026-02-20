@@ -69,11 +69,14 @@ def build_network_from_tables(nodes_df, edges_df):
         G.add_node(node_id, type=n_type, obj=obj, layer=row['tier'])
     
     for _, row in edges_df.iterrows():
-        G.add_edge(row['source'], row['target'])
+        # Store transport info as edge attributes
+        G.add_edge(row['source'], row['target'], 
+                   lead_time=row.get('transit_time', 0), 
+                   cost=row.get('transit_cost', 0))
         
     return G
 
-# --- 3. LOGIC & VISUALIZATION ---
+# --- 3. UTILIZATION LOGIC ---
 def run_utilization_analysis(G, monthly_demand):
     target_moh = 12
     target_stock = monthly_demand * target_moh
@@ -86,69 +89,99 @@ def run_utilization_analysis(G, monthly_demand):
 
 # --- 4. STREAMLIT APP UI ---
 st.set_page_config(page_title="Supply Chain Digital Twin", layout="wide")
-st.title("🌐 Supply Chain Digital Twin: 4-Tier Network Planner")
+st.title("🌐 Supply Chain Twin: Interactive Hover & Heatmap")
 
-st.sidebar.header("Data Input")
+st.sidebar.header("Data Management")
 upload_file = st.sidebar.file_uploader("Upload Supply Chain Excel", type=["xlsx"])
 demand_slider = st.sidebar.slider("Monthly Demand Units", 100, 2000, 500)
 
-# Default Sample Data
 if upload_file:
     nodes_df = pd.read_excel(upload_file, sheet_name='Nodes')
     edges_df = pd.read_excel(upload_file, sheet_name='Edges')
 else:
-    st.sidebar.info("Using Sample Data. Upload an Excel file to customize.")
+    st.sidebar.info("Using Sample Data.")
     nodes_df = pd.DataFrame({
-        'id': ['Raw_China', 'Raw_Germany', 'Assy_Mexico', 'WH_Dallas', 'Retail_NY'],
-        'type': ['manufacturer', 'manufacturer', 'manufacturer', 'warehouse', 'demand'],
-        'tier': [1, 1, 2, 2.5, 3],
-        'lat': [31.2, 52.5, 19.4, 32.7, 40.7], 'lon': [121.4, 13.4, -99.1, -96.7, -74.0],
-        'max_capacity': [1000, 1000, 600, None, None],
-        'capacity': [None, None, None, 7000, None],
-        'materials': ['M1', 'M2', 'Prod_A', '', 'Prod_A'],
-        'prod_time': [10, 5, 12, 0, 0], 'min_batch': [100, 50, 20, 1, 1], 'cost': [5, 5, 20, 2, 0]
+        'id': ['Factory_A', 'WH_1', 'Retail_X'],
+        'type': ['manufacturer', 'warehouse', 'demand'],
+        'tier': [1, 2, 3], 'lat': [35.6, 40.7, 34.0], 'lon': [139.6, -74.0, -118.2],
+        'max_capacity': [1000, None, None], 'capacity': [None, 7000, None],
+        'materials': ['P1', '', 'P1'], 'prod_time': [10, 0, 0], 'min_batch': [100, 1, 1], 'cost': [20, 2, 0]
     })
-    edges_df = pd.DataFrame({'source': ['Raw_China', 'Raw_Germany', 'Assy_Mexico', 'WH_Dallas'], 
-                             'target': ['Assy_Mexico', 'Assy_Mexico', 'WH_Dallas', 'Retail_NY']})
+    edges_df = pd.DataFrame({
+        'source': ['Factory_A', 'WH_1'], 'target': ['WH_1', 'Retail_X'],
+        'transit_time': [14, 3], 'transit_cost': [5.5, 2.0]
+    })
 
 network = build_network_from_tables(nodes_df, edges_df)
 run_utilization_analysis(network, demand_slider)
 
-tab1, tab2, tab3 = st.tabs(["📊 Logical Heat Map", "🌍 Geospatial Map", "📋 Raw Data"])
+tab1, tab2 = st.tabs(["📊 Logical Network", "🌍 Global Map"])
 
+# --- TAB 1: LOGICAL HEAT MAP WITH EDGE HOVER ---
 with tab1:
-    st.subheader("Network Capacity Utilization")
     pos = nx.multipartite_layout(network, subset_key="layer")
-    node_x, node_y, node_colors, hover_texts = [], [], [], []
-    for node, data in network.nodes(data=True):
-        x, y = pos[node]
+    
+    # Draw Edge Lines
+    edge_x, edge_y = [], []
+    for s, t in network.edges():
+        x0, y0 = pos[s]
+        x1, y1 = pos[t]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+    
+    edge_line_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1, color='#bbb'), mode='lines', hoverinfo='none', showlegend=False)
+
+    # Draw Edge Midpoints for Hover
+    mid_x, mid_y, mid_text = [], [], []
+    for s, t, d in network.edges(data=True):
+        x0, y0 = pos[s]
+        x1, y1 = pos[t]
+        mid_x.append((x0 + x1) / 2)
+        mid_y.append((y0 + y1) / 2)
+        mid_text.append(f"<b>Route: {s} → {t}</b><br>Lead Time: {d['lead_time']} days<br>Transport Cost: ${d['cost']}")
+
+    edge_hover_trace = go.Scatter(x=mid_x, y=mid_y, mode='markers', marker=dict(size=10, color='rgba(0,0,0,0)'), text=mid_text, hoverinfo='text', showlegend=False)
+
+    # Nodes
+    node_x, node_y, node_util, node_text = [], [], [], []
+    for n, d in network.nodes(data=True):
+        x, y = pos[n]
         node_x.append(x)
         node_y.append(y)
-        util = getattr(data['obj'], 'peak_utilization', 0)
-        node_colors.append(util)
-        hover_texts.append(f"Node: {node}<br>Util: {util:.1f}%")
+        util = getattr(d['obj'], 'peak_utilization', 0)
+        node_util.append(util)
+        node_text.append(f"Node: {n}<br>Util: {util:.1f}%")
 
-    fig_heat = go.Figure(data=[go.Scatter(
-        x=node_x, y=node_y, mode='markers', hoverinfo='text', text=hover_texts,
-        marker=dict(showscale=True, colorscale='RdYlGn_r', color=node_colors, size=25, colorbar=dict(title="% Util"))
-    )], layout=go.Layout(plot_bgcolor='white', xaxis=dict(showgrid=False, zeroline=False), yaxis=dict(showgrid=False, zeroline=False)))
-    st.plotly_chart(fig_heat, use_container_width=True)
+    node_trace = go.Scatter(x=node_x, y=node_y, mode='markers', marker=dict(showscale=True, colorscale='RdYlGn_r', color=node_util, size=22, colorbar=dict(title="% Util")), text=node_text, hoverinfo='text')
 
+    fig_logical = go.Figure(data=[edge_line_trace, edge_hover_trace, node_trace], layout=go.Layout(plot_bgcolor='white', xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)))
+    st.plotly_chart(fig_logical, use_container_width=True)
+
+# --- TAB 2: GEOSPATIAL MAP WITH EDGE HOVER ---
 with tab2:
-    st.subheader("Global Facility Footprint")
-    map_data = []
-    for node, data in network.nodes(data=True):
-        obj = data['obj']
-        map_data.append({'Node': node, 'Lat': obj.lat, 'Lon': obj.lon, 'Util': getattr(obj, 'peak_utilization', 0)})
-    df_map = pd.DataFrame(map_data)
-    fig_map = px.scatter_geo(df_map, lat='Lat', lon='Lon', color='Util', hover_name='Node', color_continuous_scale='Reds')
-    
-    for s, t in network.edges():
-        s_obj, t_obj = network.nodes[s]['obj'], network.nodes[t]['obj']
-        fig_map.add_trace(go.Scattergeo(lat=[s_obj.lat, t_obj.lat], lon=[s_obj.lon, t_obj.lon], mode='lines', line=dict(width=1, color='gray'), opacity=0.3))
-    
-    fig_map.update_geos(projection_type="natural earth", showcountries=True)
-    st.plotly_chart(fig_map, use_container_width=True)
+    fig_map = go.Figure()
 
-with tab3:
-    st.dataframe(nodes_df)
+    # Draw Edge Lines & Midpoints
+    for s, t, d in network.edges(data=True):
+        s_obj, t_obj = network.nodes[s]['obj'], network.nodes[t]['obj']
+        
+        # Line
+        fig_map.add_trace(go.Scattergeo(lat=[s_obj.lat, t_obj.lat], lon=[s_obj.lon, t_obj.lon], mode='lines', line=dict(width=1, color='gray'), opacity=0.4, showlegend=False, hoverinfo='none'))
+        
+        # Midpoint Hover
+        fig_map.add_trace(go.Scattergeo(lat=[(s_obj.lat + t_obj.lat)/2], lon=[(s_obj.lon + t_obj.lon)/2], mode='markers', marker=dict(size=8, color='rgba(0,0,0,0)'), text=f"<b>{s} → {t}</b><br>Time: {d['lead_time']}d<br>Cost: ${d['cost']}", hoverinfo='text', showlegend=False))
+
+    # Nodes
+    map_lat, map_lon, map_util, map_hover = [], [], [], []
+    for n, d in network.nodes(data=True):
+        map_lat.append(d['obj'].lat)
+        map_lon.append(d['obj'].lon)
+        u = getattr(d['obj'], 'peak_utilization', 0)
+        map_util.append(u)
+        map_hover.append(f"{n} ({u:.1f}% Util)")
+
+    fig_map.add_trace(go.Scattergeo(lat=map_lat, lon=map_lon, mode='markers', marker=dict(size=12, color=map_util, colorscale='Reds', showscale=True), text=map_hover, hoverinfo='text', name="Facilities"))
+
+    fig_map.update_geos(projection_type="natural earth", showcountries=True, landcolor="#f9f9f9")
+    fig_map.update_layout(height=600, margin={"r":0,"t":40,"l":0,"b":0})
+    st.plotly_chart(fig_map, use_container_width=True)
