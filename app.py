@@ -69,11 +69,9 @@ def build_network_from_tables(nodes_df, edges_df):
         G.add_node(node_id, type=n_type, obj=obj, layer=row['tier'])
     
     for _, row in edges_df.iterrows():
-        # Store transport info as edge attributes
         G.add_edge(row['source'], row['target'], 
                    lead_time=row.get('transit_time', 0), 
                    cost=row.get('transit_cost', 0))
-        
     return G
 
 # --- 3. UTILIZATION LOGIC ---
@@ -89,99 +87,119 @@ def run_utilization_analysis(G, monthly_demand):
 
 # --- 4. STREAMLIT APP UI ---
 st.set_page_config(page_title="Supply Chain Digital Twin", layout="wide")
-st.title("🌐 Supply Chain Twin: Interactive Hover & Heatmap")
+st.title("🌐 Supply Chain Twin: End-to-End Strategic Planner")
 
-st.sidebar.header("Data Management")
+# Sidebar for controls
+st.sidebar.header("Control Center")
 upload_file = st.sidebar.file_uploader("Upload Supply Chain Excel", type=["xlsx"])
-demand_slider = st.sidebar.slider("Monthly Demand Units", 100, 2000, 500)
+demand_slider = st.sidebar.slider("Global Monthly Demand", 100, 5000, 500)
 
+# Load Data Logic
 if upload_file:
     nodes_df = pd.read_excel(upload_file, sheet_name='Nodes')
     edges_df = pd.read_excel(upload_file, sheet_name='Edges')
 else:
-    st.sidebar.info("Using Sample Data.")
+    # Embedded Sample Data
     nodes_df = pd.DataFrame({
-        'id': ['Factory_A', 'WH_1', 'Retail_X'],
-        'type': ['manufacturer', 'warehouse', 'demand'],
-        'tier': [1, 2, 3], 'lat': [35.6, 40.7, 34.0], 'lon': [139.6, -74.0, -118.2],
-        'max_capacity': [1000, None, None], 'capacity': [None, 7000, None],
-        'materials': ['P1', '', 'P1'], 'prod_time': [10, 0, 0], 'min_batch': [100, 1, 1], 'cost': [20, 2, 0]
+        'id': ['Raw_China', 'Raw_Germany', 'Assy_Mexico', 'WH_Dallas', 'Retail_NY'],
+        'type': ['manufacturer', 'manufacturer', 'manufacturer', 'warehouse', 'demand'],
+        'tier': [1, 1, 2, 2.5, 3],
+        'lat': [31.2, 52.5, 19.4, 32.7, 40.7], 'lon': [121.4, 13.4, -99.1, -96.7, -74.0],
+        'max_capacity': [2000, 2000, 1000, None, None],
+        'capacity': [None, None, None, 10000, None],
+        'materials': ['M1', 'M2', 'Prod_A', '', 'Prod_A'],
+        'prod_time': [10, 5, 12, 0, 0], 'min_batch': [100, 50, 20, 1, 1], 'cost': [5, 5, 20, 2, 0]
     })
     edges_df = pd.DataFrame({
-        'source': ['Factory_A', 'WH_1'], 'target': ['WH_1', 'Retail_X'],
-        'transit_time': [14, 3], 'transit_cost': [5.5, 2.0]
+        'source': ['Raw_China', 'Raw_Germany', 'Assy_Mexico', 'WH_Dallas'], 
+        'target': ['Assy_Mexico', 'Assy_Mexico', 'WH_Dallas', 'Retail_NY'],
+        'transit_time': [25, 18, 5, 3], 'transit_cost': [4.5, 3.0, 1.2, 0.8]
     })
 
 network = build_network_from_tables(nodes_df, edges_df)
 run_utilization_analysis(network, demand_slider)
 
-tab1, tab2 = st.tabs(["📊 Logical Network", "🌍 Global Map"])
+# Tab Navigation
+tab_docs, tab_logic, tab_geo, tab_data = st.tabs([
+    "📖 Documentation", 
+    "📊 Logical Network", 
+    "🌍 Global Map", 
+    "📋 Raw Data Explorer"
+])
 
-# --- TAB 1: LOGICAL HEAT MAP WITH EDGE HOVER ---
-with tab1:
+# --- TAB: DOCUMENTATION ---
+with tab_docs:
+    st.header("App Overview & Strategic Logic")
+    st.markdown("""
+    ### Purpose
+    This Digital Twin simulates a **4-tier supply chain network** to evaluate the feasibility of a **12-month Months-On-Hand (MOH)** inventory strategy. It allows supply chain managers to visualize bottlenecks and geospatial risks in real-time.
+
+    ### Key Features
+    * **Capacity Heatmap:** Nodes change color based on their utilization. **Red** indicates a capacity breach (Util > 100%).
+    * **Geospatial Risk:** View the physical distance and shipping lanes between global suppliers.
+    * **Interactive Tunnels:** Hover over links (edges) to see transport lead times and costs.
+    
+    ### Mathematical Model
+    1.  **Inventory Target:** $Target = Monthly Demand \times 12$
+    2.  **Utilization:** % of capacity used to maintain the equilibrium of the 12-month buffer.
+    3.  **Lead Time Offset:** Calculation of production start dates based on the sum of transport and manufacturing lead times.
+    """)
+    st.info("💡 **Tip:** Use the slider in the sidebar to stress-test the network. Watch how the US Factory turns red when demand exceeds its max capacity.")
+
+# --- TAB: LOGICAL NETWORK ---
+with tab_logic:
     pos = nx.multipartite_layout(network, subset_key="layer")
     
-    # Draw Edge Lines
-    edge_x, edge_y = [], []
-    for s, t in network.edges():
-        x0, y0 = pos[s]
-        x1, y1 = pos[t]
-        edge_x.extend([x0, x1, None])
-        edge_y.extend([y0, y1, None])
-    
-    edge_line_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=1, color='#bbb'), mode='lines', hoverinfo='none', showlegend=False)
-
-    # Draw Edge Midpoints for Hover
-    mid_x, mid_y, mid_text = [], [], []
+    # Edges
+    edge_x, edge_y, mid_x, mid_y, mid_text = [], [], [], [], []
     for s, t, d in network.edges(data=True):
-        x0, y0 = pos[s]
-        x1, y1 = pos[t]
-        mid_x.append((x0 + x1) / 2)
-        mid_y.append((y0 + y1) / 2)
-        mid_text.append(f"<b>Route: {s} → {t}</b><br>Lead Time: {d['lead_time']} days<br>Transport Cost: ${d['cost']}")
+        x0, y0, x1, y1 = pos[s][0], pos[s][1], pos[t][0], pos[t][1]
+        edge_x.extend([x0, x1, None]); edge_y.extend([y0, y1, None])
+        mid_x.append((x0 + x1) / 2); mid_y.append((y0 + y1) / 2)
+        mid_text.append(f"Route: {s} → {t}<br>Time: {d['lead_time']} days<br>Cost: ${d['cost']}")
 
-    edge_hover_trace = go.Scatter(x=mid_x, y=mid_y, mode='markers', marker=dict(size=10, color='rgba(0,0,0,0)'), text=mid_text, hoverinfo='text', showlegend=False)
-
+    fig_logical = go.Figure()
+    fig_logical.add_trace(go.Scatter(x=edge_x, y=edge_y, line=dict(width=1, color='#bbb'), mode='lines', hoverinfo='none'))
+    fig_logical.add_trace(go.Scatter(x=mid_x, y=mid_y, mode='markers', marker=dict(size=10, color='rgba(0,0,0,0)'), text=mid_text, hoverinfo='text'))
+    
     # Nodes
-    node_x, node_y, node_util, node_text = [], [], [], []
+    nx, ny, nutil, ntext = [], [], [], []
     for n, d in network.nodes(data=True):
-        x, y = pos[n]
-        node_x.append(x)
-        node_y.append(y)
-        util = getattr(d['obj'], 'peak_utilization', 0)
-        node_util.append(util)
-        node_text.append(f"Node: {n}<br>Util: {util:.1f}%")
+        nx.append(pos[n][0]); ny.append(pos[n][1])
+        u = getattr(d['obj'], 'peak_utilization', 0)
+        nutil.append(u); ntext.append(f"Node: {n}<br>Util: {u:.1f}%")
 
-    node_trace = go.Scatter(x=node_x, y=node_y, mode='markers', marker=dict(showscale=True, colorscale='RdYlGn_r', color=node_util, size=22, colorbar=dict(title="% Util")), text=node_text, hoverinfo='text')
-
-    fig_logical = go.Figure(data=[edge_line_trace, edge_hover_trace, node_trace], layout=go.Layout(plot_bgcolor='white', xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)))
+    fig_logical.add_trace(go.Scatter(x=nx, y=ny, mode='markers', marker=dict(showscale=True, colorscale='RdYlGn_r', color=nutil, size=25, colorbar=dict(title="% Util")), text=ntext, hoverinfo='text'))
+    fig_logical.update_layout(plot_bgcolor='white', xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False))
     st.plotly_chart(fig_logical, use_container_width=True)
 
-# --- TAB 2: GEOSPATIAL MAP WITH EDGE HOVER ---
-with tab2:
+# --- TAB: GLOBAL MAP ---
+with tab_geo:
     fig_map = go.Figure()
-
-    # Draw Edge Lines & Midpoints
     for s, t, d in network.edges(data=True):
         s_obj, t_obj = network.nodes[s]['obj'], network.nodes[t]['obj']
-        
-        # Line
-        fig_map.add_trace(go.Scattergeo(lat=[s_obj.lat, t_obj.lat], lon=[s_obj.lon, t_obj.lon], mode='lines', line=dict(width=1, color='gray'), opacity=0.4, showlegend=False, hoverinfo='none'))
-        
-        # Midpoint Hover
-        fig_map.add_trace(go.Scattergeo(lat=[(s_obj.lat + t_obj.lat)/2], lon=[(s_obj.lon + t_obj.lon)/2], mode='markers', marker=dict(size=8, color='rgba(0,0,0,0)'), text=f"<b>{s} → {t}</b><br>Time: {d['lead_time']}d<br>Cost: ${d['cost']}", hoverinfo='text', showlegend=False))
+        fig_map.add_trace(go.Scattergeo(lat=[s_obj.lat, t_obj.lat], lon=[s_obj.lon, t_obj.lon], mode='lines', line=dict(width=1, color='gray'), opacity=0.3, hoverinfo='none'))
+        fig_map.add_trace(go.Scattergeo(lat=[(s_obj.lat + t_obj.lat)/2], lon=[(s_obj.lon + t_obj.lon)/2], mode='markers', marker=dict(size=8, color='rgba(0,0,0,0)'), text=f"{s}→{t}: {d['lead_time']}d", hoverinfo='text'))
 
-    # Nodes
-    map_lat, map_lon, map_util, map_hover = [], [], [], []
+    mlat, mlon, mutil, mhover = [], [], [], []
     for n, d in network.nodes(data=True):
-        map_lat.append(d['obj'].lat)
-        map_lon.append(d['obj'].lon)
+        mlat.append(d['obj'].lat); mlon.append(d['obj'].lon)
         u = getattr(d['obj'], 'peak_utilization', 0)
-        map_util.append(u)
-        map_hover.append(f"{n} ({u:.1f}% Util)")
+        mutil.append(u); mhover.append(f"{n} ({u:.1f}% Util)")
 
-    fig_map.add_trace(go.Scattergeo(lat=map_lat, lon=map_lon, mode='markers', marker=dict(size=12, color=map_util, colorscale='Reds', showscale=True), text=map_hover, hoverinfo='text', name="Facilities"))
-
-    fig_map.update_geos(projection_type="natural earth", showcountries=True, landcolor="#f9f9f9")
-    fig_map.update_layout(height=600, margin={"r":0,"t":40,"l":0,"b":0})
+    fig_map.add_trace(go.Scattergeo(lat=mlat, lon=mlon, mode='markers', marker=dict(size=12, color=mutil, colorscale='Reds', showscale=True), text=mhover, hoverinfo='text'))
+    fig_map.update_geos(projection_type="natural earth", showcountries=True)
     st.plotly_chart(fig_map, use_container_width=True)
+
+# --- TAB: RAW DATA EXPLORER ---
+with tab_data:
+    st.header("Source Data Audit")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Nodes (Facilities)")
+        st.dataframe(nodes_df, use_container_width=True)
+    with col2:
+        st.subheader("Edges (Logistics)")
+        st.dataframe(edges_df, use_container_width=True)
+    
+    st.download_button("Download Nodes CSV", nodes_df.to_csv(index=False), "nodes.csv", "text/csv")
